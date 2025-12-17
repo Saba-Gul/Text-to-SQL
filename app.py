@@ -1,72 +1,93 @@
 import os
 import gradio as gr
-import sqlite3
 from langchain.llms import OpenAI
 from langchain_community.utilities import SQLDatabase
-#from langchain.sql_database import SQLDatabase
 from langchain_experimental.sql import SQLDatabaseChain
 
-# Fetch the OpenAI API key from environment variables
-OPENAI_API_KEY = os.getenv('openai')
+# Fetch the OpenAI API key
+OPENAI_API_KEY = os.getenv("openai")
 if OPENAI_API_KEY is None:
     raise ValueError("OpenAI API key is not set in environment variables.")
 
-# Set the OpenAI API key for the OpenAI library
-os.environ['OPENAI_API_KEY'] = OPENAI_API_KEY
-#os.environ("openai")
-# Set your OpenAI API key (replace 'your-openai-api-key-here' with your actual key)
+os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
-
-# Global variable to store the database path
+# Global variable to store database path
 db_path = None
 
-# Function to upload and set the SQLite database
+
+# ---------- SQL SAFETY LAYER ----------
+def is_safe_sql(sql: str) -> bool:
+    forbidden_keywords = ["drop", "delete", "update", "insert", "alter"]
+    sql_lower = sql.lower()
+    return not any(keyword in sql_lower for keyword in forbidden_keywords)
+
+
+# ---------- DATABASE UPLOAD ----------
 def upload_database(db_file):
     global db_path
-    db_path = db_file.name  # Get the path of the uploaded file
-    return f"Database {db_file.name} uploaded successfully!"
+    db_path = db_file.name
+    return f"Database '{db_file.name}' uploaded successfully."
 
-# Function to run the LangChain SQL queries
+
+# ---------- QUERY EXECUTION ----------
 def query_sql_db(query):
     if db_path is None:
-        return "Please upload an SQLite database file first."
+        return "❌ Please upload an SQLite database first."
 
     try:
-        # Connect to the uploaded SQLite database
+        # Load database
         input_db = SQLDatabase.from_uri(f"sqlite:///{db_path}")
-        
-        # Create an instance of the OpenAI model
-        openai_llm = OpenAI()
-        
-        # Use the LLM instance in the SQLDatabaseChain
-        db_chain = SQLDatabaseChain.from_llm(openai_llm, input_db, verbose=False)
-        
-        # Execute the query
-        result = db_chain.run(query)
-        return result
+
+        # Initialize LLM
+        llm = OpenAI(temperature=0)
+
+        # Create SQL chain with intermediate steps
+        db_chain = SQLDatabaseChain.from_llm(
+            llm,
+            input_db,
+            verbose=False,
+            return_intermediate_steps=True
+        )
+
+        # Run chain
+        response = db_chain(query)
+
+        # Extract generated SQL
+        generated_sql = response["intermediate_steps"][0]
+
+        # Validate SQL
+        if not is_safe_sql(generated_sql):
+            return f"❌ Unsafe SQL detected and blocked:\n\n{generated_sql}"
+
+        # Execute safe SQL
+        result = response["result"]
+
+        return (
+            f"✅ Generated SQL:\n{generated_sql}\n\n"
+            f"📊 Query Result:\n{result}"
+        )
+
     except Exception as e:
-        return f"An error occurred: {str(e)}"
+        return f"❌ Error: {str(e)}"
 
-# Create a Gradio interface for both file upload and query
+
+# ---------- GRADIO UI ----------
 with gr.Blocks() as iface:
-    gr.Markdown("# Text-to-SQL")
-    gr.Markdown("Upload your SQLite database and then type a question in plain English to get the SQL query result.")
+    gr.Markdown("# 🧾 Text-to-SQL Analytics Assistant")
+    gr.Markdown(
+        "Upload a SQLite database and ask questions in plain English. "
+        "The system converts them into SQL queries and executes them safely."
+    )
 
-    # File upload component
     db_file = gr.File(label="Upload SQLite Database", file_types=[".sqlite", ".db"])
     upload_btn = gr.Button("Upload Database")
     upload_output = gr.Textbox(label="Upload Status")
 
-    # Input for querying the database
-    query_input = gr.Textbox(label="Enter your query in plain English")
-    query_output = gr.Textbox(label="SQL Query Result")
+    query_input = gr.Textbox(label="Ask a question (Natural Language)")
+    query_output = gr.Textbox(label="Result")
     query_btn = gr.Button("Run Query")
 
-    # Link the upload button to the upload_database function
     upload_btn.click(upload_database, inputs=db_file, outputs=upload_output)
-    
-    # Link the query button to the query_sql_db function
     query_btn.click(query_sql_db, inputs=query_input, outputs=query_output)
 
-# Launch the app
 iface.launch()
